@@ -1,4 +1,9 @@
 venv/
+.venv/
 __pycache__/
+.pytest_cache/
 .env
-smog.db
+*.db
+data/hourly_raw.csv
+data/daily_all.csv
+test_api.py
