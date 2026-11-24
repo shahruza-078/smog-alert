@@ -19,9 +19,9 @@ Terms: free for non-commercial use, no API key, limit 10,000 requests per day. O
 - Features of day D (only hours before 20:00, because the post is in the evening): PM2.5 mean, max and last-3-hours mean; temperature, humidity, wind speed, surface pressure, precipitation. Week 10 adds lags (1–3 days), rolling means (3 and 7 days), weekday and season (sin/cos).
 
 ## 4. Period and size
-- Downloaded from [first complete day] to [last day]; one row per Tashkent calendar day.
-- [N] daily rows, of which [N complete] have both flags set.
-- Train part: [N train] rows. Test part: 60 days (see section 6).
+- Downloaded from 2023-01-01 to 2026-11-24 (today, incomplete; last complete day 2026-11-23); one row per Tashkent calendar day.
+- 1424 daily rows, of which 1423 have both flags set.
+- Train part: 1356 rows. Test part: 60 days (see section 6).
 
 ## 5. Cleaning rules
 1. All times are Tashkent local time (`timezone=Asia/Tashkent` in every request). No UTC days.
