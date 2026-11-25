@@ -204,8 +204,11 @@ def get_daily(start=None, end=None, with_meta: bool = False) -> pd.DataFrame:
 
 # ----------------------------------------------------------------------------- prediction log
 def log_prediction(record: dict) -> bool:
-    """Store one forecast. Returns True if a new row was written, False if one already exists
+    """Store one forecast. Returns True if a row was written, False if one already exists
     for the same (target_date, model_version), so a second run never duplicates a forecast.
+    The only row that is ever replaced is a 'no_forecast' that was not posted yet, when a real
+    forecast for the same day and version arrives later (data came back). Real forecasts are
+    never overwritten.
 
     record uses the keys returned by predict.predict_tomorrow():
     target_date, pred_pm25, prob_unhealthy, is_unhealthy, confidence, model_version,
@@ -232,7 +235,13 @@ def log_prediction(record: dict) -> bool:
         cur = conn.execute(
             "INSERT INTO predictions (time, target_date, input, prediction, prob_unhealthy, "
             "is_unhealthy, confidence, model_version, status, reason) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(target_date, model_version) DO NOTHING",
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(target_date, model_version) DO UPDATE SET "
+            "time=excluded.time, input=excluded.input, prediction=excluded.prediction, "
+            "prob_unhealthy=excluded.prob_unhealthy, is_unhealthy=excluded.is_unhealthy, "
+            "confidence=excluded.confidence, status=excluded.status, reason=excluded.reason "
+            "WHERE predictions.status = 'no_forecast' AND predictions.posted_at IS NULL "
+            "AND excluded.status = 'ok'",
             values,
         )
         return cur.rowcount == 1
