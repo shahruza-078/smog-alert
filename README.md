@@ -8,7 +8,7 @@ Data: [Open-Meteo](https://open-meteo.com/) (air quality and weather). PM2.5 her
 
 ## How to run (Windows, from the project folder)
 
-    python -m venv venv
+    py -3.12 -m venv venv
     venv\Scripts\Activate.ps1          (PowerShell)   or   venv\Scripts\activate   (Command Prompt)
     pip install -r requirements.txt
     python data_sources.py             # download history, writes data/*.csv, prints a summary

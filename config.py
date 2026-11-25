@@ -3,6 +3,7 @@
 The test-set dates are NOT typed here. They live in split_config.json (decided once, on
 day one) and are read from there, so there is a single source of truth.
 """
+import os
 import json
 from pathlib import Path
 
@@ -25,7 +26,7 @@ HISTORY_START = "2023-01-01"    # first day we try to download (the API may allo
 # ---- the "unhealthy day" threshold (ug/m3) ---------------------------------
 # PLACEHOLDER. Decided with the client in week 10, written in docs/decision_note.md.
 UNHEALTHY_THRESHOLD = 15.0
-
+DATABASE_PATH = os.environ.get("DATABASE_PATH", str(ROOT / "data" / "smog.db"))
 # ---- test split (read from split_config.json) ------------------------------
 def _load_split():
     with open(ROOT / "split_config.json", encoding="utf-8") as f:
