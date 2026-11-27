@@ -26,3 +26,19 @@ Only air-quality numbers, weather numbers, our forecasts and the real values. No
 
 ## After the course
     fly apps destroy <app-name>     # stops all charges; also deletes the volume
+
+## Live app
+https://smog-tashkent-b7k2.fly.dev/  (public page, `/health` for the platform check)
+
+## Backup of the database (do weekly and before every deploy that changes the schema)
+    fly ssh sftp get /data/smog.db smog-backup.db
+Keep the copy outside git (it is in `.gitignore` and `.dockerignore` as `data/smog.db*`; name the copy `smog-backup-YYYY-MM-DD.db`). Fly also keeps automatic volume snapshots (5 days).
+Restore: `fly ssh sftp shell`, then `put smog-backup.db /data/smog.db`, then `fly machine restart <id>`.
+
+## Notice for channel subscribers (pin this message in the channel)
+> This channel posts a daily PM2.5 air-quality forecast for Tashkent. We store only air-quality and weather numbers, our forecasts and the real values. We do not collect any information about subscribers (Telegram does not tell us who reads the channel). Questions or feedback: write to <contact>. Forecasts are not medical advice.
+
+## Restart test (record the result in the report)
+1. Open the public page, note the "Last forecasts" table.
+2. `fly machine list`, then `fly machine restart <id>`.
+3. After about 30 seconds: `/health` says `ok`, the table is unchanged, no second post in the channel.
