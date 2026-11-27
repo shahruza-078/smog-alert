@@ -110,6 +110,21 @@ def test_log_prediction_twice_does_not_duplicate():
     assert len(db.get_predictions()) == 1
 
 
+def test_unposted_no_forecast_is_upgraded_but_a_real_forecast_never_is():
+    db.log_prediction(_record(status="no_forecast", pred_pm25=None, is_unhealthy=None))
+    assert db.log_prediction(_record(pred_pm25=42.0)) is True          # upgrade: data came back
+    assert db.get_predictions().iloc[0]["status"] == "ok"
+    assert db.log_prediction(_record(pred_pm25=99.0)) is False         # real forecast is kept
+    assert db.get_predictions().iloc[0]["prediction"] == 42.0
+
+
+def test_posted_no_forecast_is_never_replaced():
+    db.log_prediction(_record(status="no_forecast", pred_pm25=None, is_unhealthy=None))
+    db.mark_posted("2026-02-01", "v1")
+    assert db.log_prediction(_record()) is False
+    assert db.get_predictions().iloc[0]["status"] == "no_forecast"
+
+
 def test_two_model_versions_can_forecast_the_same_day():
     db.log_prediction(_record(model_version="v1"))
     db.log_prediction(_record(model_version="v2"))
