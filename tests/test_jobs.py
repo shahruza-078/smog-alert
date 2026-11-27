@@ -182,3 +182,37 @@ def test_telegram_without_settings_returns_false(monkeypatch):
     # make sure a real .env on this computer cannot leak in (and nothing is sent for real)
     monkeypatch.setattr(telegram_client.os, "getenv", lambda key, default=None: None)
     assert telegram_client.send_message("hi") is False
+
+
+# ----------------------------------------------------------------------------- guards added in week 11
+def test_too_early_does_nothing():
+    sender = Sender()
+    result = jobs.evening_job(pd.Timestamp("2026-11-25 14:00"), fetch=fake_fetch,
+                              predict_fn=ok_predictor, send=sender)
+    assert result["status"] == "too_early"
+    assert sender.messages == []
+    assert len(db.get_predictions()) == 0
+
+
+def test_dry_run_logs_but_does_not_post():
+    sender = Sender(results=(None,))             # send_or_dry_run returns None in dry-run mode
+    result = run_evening(sender)
+    assert result["status"] == "dry_run"
+    row = db.get_predictions().iloc[0]
+    assert pd.isna(row["posted_at"])
+
+
+def test_dry_run_sender_respects_env(monkeypatch):
+    monkeypatch.setenv("DRY_RUN", "1")
+    assert telegram_client.send_or_dry_run("hello") is None
+
+
+def test_impossible_input_gives_no_forecast():
+    def bad_fetch(start, end):
+        df = fake_fetch(start, end)
+        df["relative_humidity_2m"] = 400.0
+        return df
+    sender = Sender()
+    result = run_evening(sender, fetch=bad_fetch)
+    assert result["forecast"] == "no_forecast"
+    assert "No PM2.5 forecast" in sender.messages[0]

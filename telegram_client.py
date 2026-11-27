@@ -46,3 +46,12 @@ def send_message(text, token=None, channel=None, retries=3, timeout=30, sleep=ti
         if attempt < retries:
             sleep(2 * attempt)
     return False
+
+
+def send_or_dry_run(text) -> "bool | None":
+    """Like send_message, but with DRY_RUN=1 nothing is sent and None is returned.
+    Lets us rehearse the whole evening job on the server without posting to real subscribers."""
+    if os.getenv("DRY_RUN", "").strip().lower() in ("1", "true", "yes"):
+        log.info("DRY_RUN: would have posted %d characters", len(text))
+        return None
+    return send_message(text)

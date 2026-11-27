@@ -8,6 +8,7 @@ and `posted_at` is set only after Telegram accepted the message. A rerun sees th
 posted_at, and does nothing. If sending failed, posted_at stays empty and a rerun sends it.
 """
 import logging
+import os
 import sys
 
 import pandas as pd
@@ -15,6 +16,7 @@ import pandas as pd
 import config
 import data_sources
 import db
+import input_checks
 import telegram_client
 
 log = logging.getLogger(__name__)
@@ -51,18 +53,28 @@ def format_no_forecast(rec: dict) -> str:
 
 # ----------------------------------------------------------------------------- jobs
 def evening_job(now=None, *, fetch=data_sources.fetch_hourly, to_daily=data_sources.hourly_to_daily,
-                predict_fn=None, send=telegram_client.send_message) -> dict:
+                predict_fn=None, send=telegram_client.send_or_dry_run) -> dict:
     """Update the data, forecast tomorrow, log it, post it. Returns a short summary dict."""
     today = _today(now)
     target = today + pd.Timedelta(days=1)
+
+    # The model was trained on hours before CUTOFF_HOUR. Running earlier would mean a
+    # different input than in training (training-serving skew), so we refuse.
+    current = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz=config.TIMEZONE)
+    if current.hour < config.CUTOFF_HOUR:
+        return {"status": "too_early", "target_date": str(target)[:10]}
 
     try:
         hourly = fetch(today - pd.Timedelta(days=LOOKBACK_DAYS), today)
         db.upsert_daily(to_daily(hourly))
         window = db.get_daily(today - pd.Timedelta(days=LOOKBACK_DAYS), today)
+        if len(window):
+            problems = input_checks.check_row(window.iloc[-1])
+            if problems:
+                raise ValueError("input check failed")
         if predict_fn is None:                      # imported here: predict.py is written by A
             import predict
-            bundle = predict.load_model()
+            bundle = predict.load_model(os.getenv("MODEL_VERSION") or None)
             predict_fn = lambda daily: predict.predict_tomorrow(daily, bundle)
         rec = dict(predict_fn(window))
     except Exception as exc:                        # API down, model missing, ...
@@ -79,7 +91,10 @@ def evening_job(now=None, *, fetch=data_sources.fetch_hourly, to_daily=data_sour
 
     stored = row.to_dict()
     text = (format_forecast(rec) if stored["status"] == "ok" else format_no_forecast(rec))
-    if send(text):
+    sent = send(text)
+    if sent is None:                                # DRY_RUN: logged, not posted, posted_at stays empty
+        return {"status": "dry_run", "forecast": stored["status"], "target_date": str(rec["target_date"])[:10]}
+    if sent:
         db.mark_posted(rec["target_date"], version)
         return {"status": "posted", "forecast": stored["status"], "target_date": str(rec["target_date"])[:10]}
     return {"status": "send_failed", "target_date": str(rec["target_date"])[:10]}
