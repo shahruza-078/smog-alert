@@ -11,8 +11,10 @@ Data: [Open-Meteo](https://open-meteo.com/) (air quality and weather). PM2.5 her
     py -3.12 -m venv venv
     venv\Scripts\Activate.ps1          (PowerShell)   or   venv\Scripts\activate   (Command Prompt)
     pip install -r requirements.txt
-    python data_sources.py             # download history, writes data/*.csv, prints a summary
-    pytest -q                          # offline tests
+    python data_sources.py --to-db     # download history, write data/*.csv, fill the database
+    python train.py                    # cross-validate the baselines (train data only), update the log
+    python train.py --save             # also save models/model_v0.joblib + .json
+    python -m pytest -q                # offline tests
 
 ## Files
 
@@ -21,9 +23,14 @@ Data: [Open-Meteo](https://open-meteo.com/) (air quality and weather). PM2.5 her
 | `config.py` | A | all shared constants |
 | `split_config.json` | A | test dates, decided once. Do not edit |
 | `data_sources.py` | A | download, hourly to daily table, `load_train()` |
-| `tests/test_data.py` | A | data tests (no internet needed) |
+| `features.py` | A | model inputs (lags, rolling means, season) and next-day targets |
+| `ml/baselines.py` | A | `PersistenceRegressor` (tomorrow = today) |
+| `train.py` | A | time-ordered CV of the baselines, experiment log, saves model v0 |
+| `predict.py` | A | `load_model()` and `predict_tomorrow()`, called by B's jobs |
+| `logs/experiment_log.csv` | A | every training run, including failures. Never delete rows |
+| `tests/test_data.py`, `tests/test_ml.py` | A | data and ML tests (no internet needed) |
 | `docs/CONTRACTS.md` | A + B | what we agreed so our parts fit |
 | `docs/data_plan.md` | A | week 9 data plan |
 | `docs/WEEK9_B_TASKS.md` | B | week 9 tasks for the service side |
 
-Coming later: `features.py`, `ml/baselines.py`, `train.py`, `promote.py`, `release_eval.py`, `predict.py` (A); `db.py`, `jobs.py`, `app.py`, `monitoring.py`, `Dockerfile` (B).
+Coming later: `promote.py`, `release_eval.py` (A); `db.py`, `jobs.py`, `app.py`, `monitoring.py`, `Dockerfile` (B).

@@ -24,8 +24,10 @@ MIN_HOURS_FULL = 18             # need >= 18 valid hours out of 24 for a day to 
 HISTORY_START = "2023-01-01"    # first day we try to download (the API may allow a later one)
 
 # ---- the "unhealthy day" threshold (ug/m3) ---------------------------------
-# PLACEHOLDER. Decided with the client in week 10, written in docs/decision_note.md.
-UNHEALTHY_THRESHOLD = 15.0
+# DRAFT: 25 (proposal). On the training data 51% of days are >= 15, 13% >= 25, 6% >= 35, 1% >= 55.
+# The WHO value 15 flags half of all days, so it would be useless as a warning.
+# Agree it together (A + B) and write the reason in docs/decision_note.md.
+UNHEALTHY_THRESHOLD = 25.0
 DATABASE_PATH = os.environ.get("DATABASE_PATH", str(ROOT / "data" / "smog.db"))
 # ---- test split (read from split_config.json) ------------------------------
 def _load_split():

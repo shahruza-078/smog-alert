@@ -1,293 +1,250 @@
-"""train.py - rebuild the PM2.5 model from the database with ONE command.
+"""train.py  [A]  Evaluate the baselines on TRAIN data only and (optionally) save model v0.
 
-    python train.py                      # compare models with cross-validation (test set untouched)
-    python train.py --release            # ONLY when ready: fit, score the test set once, save v1
-    python train.py --release --version 2   # later: a v2 candidate (promotion gate comes in week 14)
+    python train.py                          # cross-validation, writes the experiment log
+    python train.py --save                   # also saves models/model_v0.joblib + .json
+    python train.py --why "tried X"          # your reason goes into logs/experiment_log.csv
 
-Task: on the evening of day D, predict the daily mean PM2.5 of day D+1 (regression)
-and whether D+1 is an unhealthy day (classification).
+Rules enforced here
+  * Only data_sources.load_train() rows are used. The test part is never read in this file;
+    only release_eval.py (week 13) opens it, once.
+  * Cross-validation is time-ordered (TimeSeriesSplit with a 7-row gap), never random.
+  * Every run is appended to logs/experiment_log.csv, good or bad. Never delete rows.
+  * A saved model_vN.joblib / .json is never overwritten.
 
-Rules from the handbook that this script enforces:
-  * Split by DATE, never at random. The cut-off is written once to split.json ("day one").
-  * Models are chosen with time-ordered cross-validation on the TRAIN part only.
-  * The test part is only read when --release is given, and a released version
-    (model_vN.joblib / model_vN.json) is never overwritten.
-  * Every run is appended to experiment_log.csv, including baselines and bad runs.
-  * Features use only data known on the evening of day D (nothing from D+1).
+v0 = the baseline the app serves in week 11 (persistence: tomorrow = today). The course
+models (kNN, decision tree, logistic regression) and promote.py come in weeks 12-14.
 """
 import argparse
 import csv
 import json
-import os
-import sqlite3
+import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import joblib
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
-from sklearn.dummy import DummyClassifier, DummyRegressor
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.metrics import mean_absolute_error, precision_score, recall_score
+from sklearn.dummy import DummyRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.neighbors import KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.tree import DecisionTreeRegressor
 
-# Agree this with the client! WHO 24-hour guideline is 15 ug/m3, but most Tashkent
-# winter days exceed it. A higher value (e.g. 35 or 55) may match "move PE indoors".
-DEFAULT_THRESHOLD = 15.0
-TEST_FRACTION = 0.15
-MIN_ROWS = 60
+import config
+import data_sources
+import features
+from ml.baselines import PersistenceRegressor
 
-FEATURES = ["pm25_today", "pm25_lag1", "pm25_lag2", "pm25_mean7",
-            "temp", "humidity", "wind", "pressure", "precip",
-            "dow_sin", "dow_cos", "month_sin", "month_cos"]
-
-
-# ----------------------------------------------------------------- data
-def load_daily(db):
-    con = sqlite3.connect(db)
-    df = pd.read_sql("SELECT * FROM daily", con, parse_dates=["date"])
-    con.close()
-    df = df.set_index("date").sort_index()
-    # Reindex to every calendar day so shift(1) always means "exactly one day earlier".
-    return df.reindex(pd.date_range(df.index.min(), df.index.max(), freq="D"))
+MODELS_DIR = config.ROOT / "models"
+LOGS_DIR = config.ROOT / "logs"
+N_SPLITS = 5
+CV_GAP = 7          # rows skipped between a training fold and its validation fold
+MIN_ROWS = 100
+LOG_COLUMNS = ["#", "Date", "What changed", "Why we tried it", "CV score", "Kept?"]
 
 
-def build_features(daily):
-    """One row per evening D. Row index = D. Target y = PM2.5 mean of D+1.
-
-    Note: daily weather means of day D are used as if known at posting time. At the real
-    evening post, the last hours of D are not yet in; mention this in your limitations.
-    """
-    pm = daily["pm25_mean"]
-    X = pd.DataFrame(index=daily.index)
-    X["pm25_today"] = pm
-    X["pm25_lag1"] = pm.shift(1)
-    X["pm25_lag2"] = pm.shift(2)
-    X["pm25_mean7"] = pm.rolling(7, min_periods=5).mean()
-    for c in ["temp", "humidity", "wind", "pressure", "precip"]:
-        X[c] = daily[c]
-    dow, month = X.index.dayofweek, X.index.month
-    X["dow_sin"], X["dow_cos"] = np.sin(2 * np.pi * dow / 7), np.cos(2 * np.pi * dow / 7)
-    X["month_sin"], X["month_cos"] = np.sin(2 * np.pi * month / 12), np.cos(2 * np.pi * month / 12)
-    X["y"] = pm.shift(-1)  # tomorrow's value = the label
-    return X.dropna()
+# ------------------------------------------------------------------------- models
+def make_pipeline(estimator):
+    """The one helper every real model goes through: fill gaps, scale, then the model."""
+    return Pipeline([("impute", SimpleImputer(strategy="median")),
+                     ("scale", StandardScaler()),
+                     ("model", estimator)])
 
 
-def get_split(data, outdir):
-    """Test cut-off is decided once and stored. Never recomputed."""
-    path = os.path.join(outdir, "split.json")
-    if os.path.exists(path):
-        with open(path) as f:
-            test_start = pd.Timestamp(json.load(f)["test_start"])
-    else:
-        test_start = data.index[int(len(data) * (1 - TEST_FRACTION))]
-        with open(path, "w") as f:
-            json.dump({"test_start": str(test_start.date()),
-                       "created": datetime.now().isoformat(timespec="seconds"),
-                       "note": "Rows on/after test_start are the test set. Do not edit."}, f, indent=2)
-        print(f"Created {path}: test set = dates from {test_start.date()} (set aside).")
-    # 1-day gap: a train row's label (D+1) must not be a test row's input (D).
-    train = data[data.index < test_start - pd.Timedelta(days=1)]
-    test = data[data.index >= test_start]
-    return train, test
+def candidate_pipelines():
+    return {
+        # no imputer/scaler: these two must see the raw feature values
+        "dummy_median": Pipeline([("model", DummyRegressor(strategy="median"))]),
+        "persistence": Pipeline([("model", PersistenceRegressor())]),
+        "linear_regression": make_pipeline(LinearRegression()),
+    }
 
 
-# ----------------------------------------------------------------- models
-def make_pipeline(model):
-    return Pipeline([("scale", StandardScaler()), ("model", model)])
+# ------------------------------------------------------------------------- evaluation
+def _nan_to_none(x):
+    return None if x is None or (isinstance(x, float) and np.isnan(x)) else x
 
 
-def regression_candidates():
-    c = {"linear_regression": make_pipeline(LinearRegression())}
-    for k in (5, 10, 20):
-        c[f"knn_k{k}"] = make_pipeline(KNeighborsRegressor(n_neighbors=k))
-    for d in (3, 5, 8):
-        c[f"tree_depth{d}"] = make_pipeline(
-            DecisionTreeRegressor(max_depth=d, min_samples_leaf=10, random_state=0))
-    return c
+def cv_evaluate(X, y_reg, y_clf, pipelines, threshold, n_splits=N_SPLITS, gap=CV_GAP):
+    """Time-ordered CV. Returns (results per model, out-of-fold predictions)."""
+    splitter = TimeSeriesSplit(n_splits=n_splits, gap=gap)
+    oof = pd.DataFrame({"y_true": y_reg}, index=X.index)
+    results = {}
+    for name, pipe in pipelines.items():
+        pred = pd.Series(np.nan, index=X.index)
+        maes = []
+        for tr, va in splitter.split(X):
+            model = clone(pipe).fit(X.iloc[tr], y_reg.iloc[tr])
+            p = model.predict(X.iloc[va])
+            pred.iloc[va] = p
+            maes.append(mean_absolute_error(y_reg.iloc[va], p))
+        oof[f"pred_{name}"] = pred
+
+        seen = pred.notna()
+        flag = (pred[seen] >= threshold).astype(int)
+        real = y_clf[seen]
+        tp = int(((flag == 1) & (real == 1)).sum())
+        results[name] = {
+            "mae": float(np.mean(maes)), "mae_std": float(np.std(maes)),
+            "recall": tp / int(real.sum()) if real.sum() else None,       # real unhealthy days caught
+            "precision": tp / int(flag.sum()) if flag.sum() else None,    # alarms that were right
+            "n_unhealthy": int(real.sum()), "n_flagged": int(flag.sum()),
+        }
+    return results, oof
 
 
-def make_classifier():
-    # class_weight balanced: the client says missing a bad day is worse than a false alarm.
-    return make_pipeline(LogisticRegression(class_weight="balanced", max_iter=1000))
+def write_error_worksheet(path, X, oof, model="persistence", n=20):
+    """The n worst out-of-fold forecasts, ready for error worksheet 1 (fill in `cause`)."""
+    err = (oof["y_true"] - oof[f"pred_{model}"]).abs().dropna().sort_values(ascending=False).head(n)
+    ws = pd.concat([oof.loc[err.index, ["y_true", f"pred_{model}"]], err.rename("abs_error"),
+                    X.loc[err.index, ["pm25_today", "pm25_lag1", "pm25_mean7", "temp_today", "wind_today"]]],
+                   axis=1)
+    ws.insert(0, "date", ws.index.strftime("%Y-%m-%d"))
+    ws["cause"] = ""   # wrong label | missing feature | rare event | typo/outlier | duplicate/leak | other
+    ws["notes"] = ""
+    ws.to_csv(path, index=False)
 
 
-# ----------------------------------------------------------------- evaluation
-def cv_mae(train, estimator=None, n_splits=5):
-    """Time-ordered CV. estimator=None means persistence (tomorrow = today)."""
-    errs = []
-    for tr, va in TimeSeriesSplit(n_splits=n_splits).split(train):
-        a, b = train.iloc[tr], train.iloc[va]
-        if estimator is None:
-            pred = b["pm25_today"]
-        else:
-            pred = clone(estimator).fit(a[FEATURES], a["y"]).predict(b[FEATURES])
-        errs.append(mean_absolute_error(b["y"], pred))
-    return float(np.mean(errs)), float(np.std(errs))
-
-
-def cv_unhealthy(train, thr, estimator="persistence", n_splits=5):
-    rec, prec = [], []
-    for tr, va in TimeSeriesSplit(n_splits=n_splits).split(train):
-        a, b = train.iloc[tr], train.iloc[va]
-        ya, yb = (a["y"] >= thr).astype(int), (b["y"] >= thr).astype(int)
-        if isinstance(estimator, str):
-            pred = (b["pm25_today"] >= thr).astype(int)
-        else:
-            if ya.nunique() < 2:
-                continue
-            pred = clone(estimator).fit(a[FEATURES], ya).predict(b[FEATURES])
-        if yb.sum() > 0:
-            rec.append(recall_score(yb, pred, zero_division=0))
-            prec.append(precision_score(yb, pred, zero_division=0))
-    f = lambda v: float(np.mean(v)) if v else float("nan")
-    return f(rec), f(prec)
-
-
-# ----------------------------------------------------------------- experiment log
-LOG_COLS = ["#", "Date", "What changed", "Why we tried it", "CV score", "Kept?"]
-
-
+# ------------------------------------------------------------------------- logging
 def log_run(path, what, why, score, kept):
-    new = not os.path.exists(path)
+    new = not path.exists()
     n = 1
     if not new:
-        with open(path, newline="") as f:
-            n = sum(1 for _ in csv.reader(f))  # header counts as 1 -> next row number
-    with open(path, "a", newline="") as f:
+        with open(path, newline="", encoding="utf-8") as f:
+            n = sum(1 for _ in csv.reader(f))      # header is row 1 -> next number
+    with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(LOG_COLS)
-        w.writerow([n, datetime.now().strftime("%Y-%m-%d %H:%M"), what, why, score, kept])
+            w.writerow(LOG_COLUMNS)
+        w.writerow([n, datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d %H:%M"),
+                    what, why, score, kept])
 
 
-# ----------------------------------------------------------------- main
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="smog.db")
-    ap.add_argument("--outdir", default=".")
-    ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
-    ap.add_argument("--version", type=int, default=1)
-    ap.add_argument("--why", default="", help="why you are running this (goes in the log)")
-    ap.add_argument("--release", action="store_true",
-                    help="fit, score the TEST set once and save model_vN files")
-    args = ap.parse_args()
-    os.makedirs(args.outdir, exist_ok=True)
-    logpath = os.path.join(args.outdir, "experiment_log.csv")
+def _git_commit():
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=config.ROOT,
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
 
-    daily = load_daily(args.db)
-    data = build_features(daily)
-    if len(data) < MIN_ROWS:
-        print(f"WARNING: only {len(data)} usable days. Pull more history with fetch_data.py --start ...")
-    train, test = get_split(data, args.outdir)
-    thr = args.threshold
-    print(f"Usable days: {len(data)} | train {len(train)} "
-          f"({train.index.min().date()}..{train.index.max().date()}) | test {len(test)} (not touched)")
-    print(f"Share of unhealthy days (>= {thr} ug/m3) in train: {(train['y'] >= thr).mean():.0%}")
 
-    # --- baselines
-    why_base = "Reference point"
-    dummy = make_pipeline(DummyRegressor(strategy="median"))
-    d_mae, _ = cv_mae(train, dummy)
-    p_mae, _ = cv_mae(train, None)
-    log_run(logpath, "Dummy baseline (median)", why_base, f"MAE {d_mae:.2f}", "Yes (reference)")
-    log_run(logpath, "Smart baseline: persistence (tomorrow = today)", "The rule to beat",
-            f"MAE {p_mae:.2f}", "Yes (reference)")
+# ------------------------------------------------------------------------- the run
+def run(daily, models_dir=MODELS_DIR, logs_dir=LOGS_DIR, version=0, model_name="persistence",
+        threshold=None, why="", save=False, echo=print):
+    thr = config.UNHEALTHY_THRESHOLD if threshold is None else float(threshold)
+    models_dir, logs_dir = Path(models_dir), Path(logs_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- course models
-    results = {}
-    for name, est in regression_candidates().items():
-        m, s = cv_mae(train, est)
-        results[name] = (m, s)
-    best = min(results, key=lambda k: results[k][0])
-    for name, (m, s) in results.items():
-        log_run(logpath, name, args.why or "Course model comparison",
-                f"MAE {m:.2f} +/- {s:.2f}", "Yes (best)" if name == best else "No")
+    train = data_sources.load_train(daily)                 # TRAIN ROWS ONLY
+    X, y_reg, y_clf = features.make_dataset(train, thr)
+    if len(X) < MIN_ROWS:
+        sys.exit(f"Only {len(X)} usable training days (need {MIN_ROWS}). Load more history first.")
+    pipes = candidate_pipelines()
+    if model_name not in pipes:
+        sys.exit(f"Unknown model '{model_name}'. Choose one of: {', '.join(pipes)}")
 
-    # --- classifier for the unhealthy flag
-    clf = make_classifier()
-    r_rec, r_prec = cv_unhealthy(train, thr, "persistence")
-    c_rec, c_prec = cv_unhealthy(train, thr, clf)
-    log_run(logpath, f"Unhealthy flag, persistence rule (thr {thr})", "Smart baseline for the flag",
-            f"recall {r_rec:.2f}, precision {r_prec:.2f}", "Yes (reference)")
-    log_run(logpath, f"Unhealthy flag, logistic regression (thr {thr})", args.why or "Course model",
-            f"recall {c_rec:.2f}, precision {c_prec:.2f}", "Yes")
+    echo(f"Training rows: {len(X)} ({X.index.min().date()} .. {X.index.max().date()}); "
+         f"the test part ({config.TEST_START_DATE} onwards) is not touched.")
+    echo(f"Unhealthy threshold {thr:g} ug/m3: {y_clf.mean():.0%} of training days are unhealthy.")
 
-    print("\nCV results on TRAIN only (time-ordered folds), MAE in ug/m3 - lower is better")
-    print(f"  dummy median          {d_mae:6.2f}")
-    print(f"  persistence (smart)   {p_mae:6.2f}")
-    for name, (m, s) in sorted(results.items(), key=lambda kv: kv[1][0]):
-        print(f"  {name:<21} {m:6.2f} +/- {s:.2f}{'   <- best' if name == best else ''}")
-    print(f"\nUnhealthy flag CV: persistence recall {r_rec:.2f} / precision {r_prec:.2f} | "
-          f"logistic recall {c_rec:.2f} / precision {c_prec:.2f}")
-    beats = results[best][0] < p_mae
-    if not beats:
-        print("NOTE: persistence beats every course model. That is allowed - report it honestly.")
+    results, oof = cv_evaluate(X, y_reg, y_clf, pipes, thr)
 
-    if not args.release:
-        print("\nTest set NOT used. Run with --release when the decision note is ready.")
-        return
+    # ---- table
+    echo(f"\nCross-validation ({N_SPLITS} time-ordered folds). MAE in ug/m3: lower is better. "
+         "Recall = share of real unhealthy days we caught.")
+    echo(f"{'model':<20}{'MAE':>8}{'+/-':>7}{'recall':>9}{'precision':>11}")
+    fmt = lambda v: "   n/a" if v is None else f"{v:>9.2f}"
+    for name, r in results.items():
+        echo(f"{name:<20}{r['mae']:>8.2f}{r['mae_std']:>7.2f}{fmt(r['recall'])}{fmt(r['precision']):>11}")
 
-    # --- release: fit on train, score test exactly once, save versioned files
-    mpath = os.path.join(args.outdir, f"model_v{args.version}.joblib")
-    jpath = os.path.join(args.outdir, f"model_v{args.version}.json")
-    if os.path.exists(mpath) or os.path.exists(jpath):
-        sys.exit(f"{mpath} already exists. A released version never changes - use --version {args.version + 1}.")
-    reg = clone(regression_candidates()[best]).fit(train[FEATURES], train["y"])
-    ytr = (train["y"] >= thr).astype(int)
-    if ytr.nunique() < 2:
-        sys.exit("Train data has only one class for the unhealthy flag - change --threshold or add data.")
-    clf = make_classifier().fit(train[FEATURES], ytr)
+    # ---- experiment log (every run, good or bad)
+    mae_best_ref = results["persistence"]["mae"]
+    notes = {"dummy_median": ("Reference point (always guess the median)", "Yes (reference)"),
+             "persistence": ("The smart baseline to beat: tomorrow = today", "Yes (reference)"),
+             "linear_regression": ("First course model, all features",
+                                   "Yes" if results["linear_regression"]["mae"] < mae_best_ref
+                                   else "No - persistence is better")}
+    for name, r in results.items():
+        rec = "n/a" if r["recall"] is None else f"{r['recall']:.2f}"
+        pre = "n/a" if r["precision"] is None else f"{r['precision']:.2f}"
+        reason, kept = notes[name]
+        log_run(logs_dir / "experiment_log.csv", f"{name} ({N_SPLITS}-fold time CV, threshold {thr:g})",
+                why or reason, f"MAE {r['mae']:.2f} +/- {r['mae_std']:.2f}; recall {rec}; precision {pre}", kept)
 
-    yt, yt_flag = test["y"], (test["y"] >= thr).astype(int)
-    pred = reg.predict(test[FEATURES])
-    flag = clf.predict(test[FEATURES])
-    test_metrics = {
-        "mae_model": float(mean_absolute_error(yt, pred)),
-        "mae_dummy_median": float(mean_absolute_error(
-            yt, make_pipeline(DummyRegressor(strategy="median")).fit(train[FEATURES], train["y"]).predict(test[FEATURES]))),
-        "mae_persistence": float(mean_absolute_error(yt, test["pm25_today"])),
-        "unhealthy_recall_model": float(recall_score(yt_flag, flag, zero_division=0)),
-        "unhealthy_precision_model": float(precision_score(yt_flag, flag, zero_division=0)),
-        "unhealthy_recall_persistence": float(recall_score(yt_flag, (test["pm25_today"] >= thr).astype(int), zero_division=0)),
-        "n_test_days": int(len(test)),
-        "n_test_unhealthy": int(yt_flag.sum()),
-    }
+    oof.to_csv(logs_dir / f"oof_v{version}.csv", index_label="date")
+    write_error_worksheet(logs_dir / "error_worksheet_1_candidates.csv", X, oof)
+    echo(f"\nLogged to {logs_dir / 'experiment_log.csv'} and wrote the 20 worst persistence forecasts to "
+         f"error_worksheet_1_candidates.csv (fill in the `cause` column).")
+    if results["linear_regression"]["mae"] >= mae_best_ref:
+        echo("NOTE: persistence is at least as good as linear regression. That is allowed - report it honestly.")
+
+    summary = {"results": results, "n_rows": len(X), "threshold": thr}
+    if not save:
+        echo("\nNothing saved. Run with --save to write the model files.")
+        return summary
+
+    # ---- save the model (never overwrite a released version)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    tag = f"model_v{version}"
+    jpath, mpath = models_dir / f"{tag}.joblib", models_dir / f"{tag}.json"
+    if jpath.exists() or mpath.exists():
+        sys.exit(f"{jpath.name} already exists. A saved version never changes; use --version {version + 1}.")
+    final = clone(pipes[model_name]).fit(X, y_reg)
+    bundle = {"regressor": final, "classifier": None, "features": list(X.columns),
+              "threshold": thr, "version": f"v{version}", "cutoff_hour": config.CUTOFF_HOUR}
     meta = {
-        "version": f"v{args.version}",
-        "trained_at": datetime.now().isoformat(timespec="seconds"),
-        "regressor": best,
-        "classifier": "logistic_regression(class_weight=balanced)",
-        "features": FEATURES,
+        "version": f"v{version}",
+        "created_at": datetime.now(ZoneInfo(config.TIMEZONE)).isoformat(timespec="seconds"),
+        "git_commit": _git_commit(),
+        "model": model_name,
+        "train_date_range": [str(X.index.min().date()), str(X.index.max().date())],
+        "n_rows": int(len(X)),
+        "features": list(X.columns),
+        "cv_scores": {k: {m: _nan_to_none(v) for m, v in r.items()} for k, r in results.items()},
+        "test_scores": None,                          # filled by release_eval.py, once, in week 13
         "unhealthy_threshold": thr,
-        "train_range": [str(train.index.min().date()), str(train.index.max().date())],
-        "test_range": [str(test.index.min().date()), str(test.index.max().date())],
-        "n_train_days": int(len(train)),
-        "cv_mae": {k: {"mean": v[0], "std": v[1]} for k, v in results.items()},
-        "cv_mae_dummy": d_mae,
-        "cv_mae_persistence": p_mae,
-        "cv_unhealthy": {"persistence_recall": r_rec, "persistence_precision": r_prec,
-                         "model_recall": c_rec, "model_precision": c_prec},
-        "test": test_metrics,
-        "model_beats_persistence_cv": bool(beats),
+        "decision_probability_threshold": None,       # set when a classifier exists (week 12)
+        "feature_ranges": features.feature_ranges(X),
+        "cutoff_hour": config.CUTOFF_HOUR,
+        "min_hours_window": config.MIN_HOURS_WINDOW,
     }
-    joblib.dump({"regressor": reg, "classifier": clf, "features": FEATURES,
-                 "threshold": thr, "version": f"v{args.version}"}, mpath)
-    with open(jpath, "w") as f:
+    joblib.dump(bundle, jpath)
+    with open(mpath, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-    log_run(logpath, f"RELEASE v{args.version}: {best}", "Test set scored once",
-            f"test MAE {test_metrics['mae_model']:.2f} (persistence {test_metrics['mae_persistence']:.2f})", "Yes")
-    print(f"\nSaved {mpath} and {jpath}")
-    print(f"TEST (scored once): model MAE {test_metrics['mae_model']:.2f} | "
-          f"persistence {test_metrics['mae_persistence']:.2f} | dummy {test_metrics['mae_dummy_median']:.2f}")
-    print(f"Unhealthy flag on test: recall {test_metrics['unhealthy_recall_model']:.2f}, "
-          f"precision {test_metrics['unhealthy_precision_model']:.2f}")
-    print("Now tag it:  git tag v1 && git push --tags")
+    log_run(logs_dir / "experiment_log.csv", f"Saved {tag} ({model_name})",
+            "Baseline served by the app in week 11", f"CV MAE {results[model_name]['mae']:.2f}", "Yes")
+    echo(f"\nSaved {jpath} and {mpath}")
+    summary["saved"] = [str(jpath), str(mpath)]
+    return summary
+
+
+def load_daily(source="db"):
+    if source == "csv":
+        return pd.read_csv(config.ROOT / "data" / "daily_all.csv", parse_dates=["date"])
+    import db
+    daily = db.get_daily()
+    if daily.empty:
+        sys.exit("The database has no daily rows yet. Fill it first:  python data_sources.py --to-db")
+    return daily
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--source", choices=["db", "csv"], default="db", help="where the daily table comes from")
+    ap.add_argument("--version", type=int, default=0)
+    ap.add_argument("--model", default="persistence", help="which model to save as this version")
+    ap.add_argument("--threshold", type=float, default=None, help="default: config.UNHEALTHY_THRESHOLD")
+    ap.add_argument("--why", default="", help="why you are running this (goes into the experiment log)")
+    ap.add_argument("--save", action="store_true", help="write models/model_vN.joblib and .json")
+    a = ap.parse_args()
+    run(load_daily(a.source), version=a.version, model_name=a.model,
+        threshold=a.threshold, why=a.why, save=a.save)
 
 
 if __name__ == "__main__":

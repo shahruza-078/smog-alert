@@ -260,6 +260,8 @@ def main():
     ap.add_argument("--start", default=config.HISTORY_START)
     ap.add_argument("--end", default=None, help="default: today (Tashkent)")
     ap.add_argument("--outdir", default=str(config.ROOT / "data"))
+    ap.add_argument("--to-db", action="store_true",
+                    help="also store the daily rows in the SQLite database (db.py)")
     a = ap.parse_args()
 
     end = a.end or str(_now_local().date())
@@ -275,6 +277,9 @@ def main():
     ok = daily[(daily["is_reliable"] == 1) & (daily["target_ok"] == 1)]
     ok.head(50).to_csv(os.path.join(a.outdir, "sample_50.csv"), index=False)
     print(f"Saved hourly_raw.csv, daily_all.csv and sample_50.csv in {a.outdir}")
+    if a.to_db:
+        import db
+        print(f"Stored {db.upsert_daily(daily)} daily rows in {config.DATABASE_PATH}")
     describe(daily)
 
 
