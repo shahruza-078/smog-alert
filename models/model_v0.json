@@ -1,0 +1,131 @@
+{
+  "version": "v0",
+  "created_at": "2026-11-27T07:42:26+05:00",
+  "git_commit": "f7a0e49",
+  "model": "persistence",
+  "train_date_range": [
+    "2023-01-01",
+    "2026-09-16"
+  ],
+  "n_rows": 1355,
+  "features": [
+    "pm25_today",
+    "pm25_max_today",
+    "pm25_last3h",
+    "pm25_lag1",
+    "pm25_lag2",
+    "pm25_lag3",
+    "pm25_mean3",
+    "pm25_mean7",
+    "temp_today",
+    "humidity_today",
+    "wind_today",
+    "pressure_today",
+    "precip_today",
+    "dow_sin",
+    "dow_cos",
+    "doy_sin",
+    "doy_cos"
+  ],
+  "cv_scores": {
+    "dummy_median": {
+      "mae": 6.172837037037036,
+      "mae_std": 2.0131080922298668,
+      "recall": 0.0,
+      "precision": null,
+      "n_unhealthy": 149,
+      "n_flagged": 0
+    },
+    "persistence": {
+      "mae": 4.416553333333334,
+      "mae_std": 0.940857177377508,
+      "recall": 0.5167785234899329,
+      "precision": 0.616,
+      "n_unhealthy": 149,
+      "n_flagged": 125
+    },
+    "linear_regression": {
+      "mae": 3.6394987921451722,
+      "mae_std": 0.7583459678955136,
+      "recall": 0.6442953020134228,
+      "precision": 0.6575342465753424,
+      "n_unhealthy": 149,
+      "n_flagged": 146
+    }
+  },
+  "test_scores": null,
+  "unhealthy_threshold": 25.0,
+  "decision_probability_threshold": null,
+  "feature_ranges": {
+    "pm25_today": [
+      3.025,
+      89.175
+    ],
+    "pm25_max_today": [
+      6.2,
+      122.5
+    ],
+    "pm25_last3h": [
+      0.5333333333333333,
+      116.96666666666665
+    ],
+    "pm25_lag1": [
+      3.0124999999999997,
+      87.7
+    ],
+    "pm25_lag2": [
+      3.0124999999999997,
+      87.7
+    ],
+    "pm25_lag3": [
+      3.0124999999999997,
+      87.7
+    ],
+    "pm25_mean3": [
+      5.2819444444444414,
+      79.70555555555556
+    ],
+    "pm25_mean7": [
+      6.191666666666667,
+      69.64285714285714
+    ],
+    "temp_today": [
+      -21.3,
+      37.31499999999999
+    ],
+    "humidity_today": [
+      15.4,
+      97.7
+    ],
+    "wind_today": [
+      1.6349999999999998,
+      18.61
+    ],
+    "pressure_today": [
+      948.165,
+      992.3400000000001
+    ],
+    "precip_today": [
+      0.0,
+      32.900000000000006
+    ],
+    "dow_sin": [
+      -0.9749279121818236,
+      0.9749279121818236
+    ],
+    "dow_cos": [
+      -0.9009688679024191,
+      1.0
+    ],
+    "doy_sin": [
+      -0.9999994220246925,
+      0.9999855506507186
+    ],
+    "doy_cos": [
+      -0.9999791929590823,
+      0.9999907524084426
+    ]
+  },
+  "cutoff_hour": 20,
+  "min_hours_window": 16
+}

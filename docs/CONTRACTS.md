@@ -43,7 +43,7 @@ One row per Tashkent date. `date` is stored as text `YYYY-MM-DD` (primary key). 
 - `predictions` table, minimum columns from the handbook: `time, target_date, input, prediction, confidence, model_version, label, label_time`.
 
 ## 4. Model files (week 12+)
-`models/model_vN.joblib` is one scikit-learn Pipeline that `predict.py` can load. `models/model_vN.json` holds: version, created_at (Tashkent), git_commit, train_date_range, n_rows, features, cv_scores, test_scores (release only), unhealthy_threshold, decision_probability_threshold, feature_ranges (min and max per feature on training data; B uses them to catch inputs unlike the training data).
+`models/model_vN.joblib` is a bundle (a Python dict saved with joblib) that `predict.py` loads: `regressor` (one scikit-learn Pipeline), `classifier` (a Pipeline, or `None` for v0), `features`, `threshold`, `version`, `cutoff_hour`. One Pipeline per task, built by the same `make_pipeline()` helper (the instructor accepted this). `models/model_vN.json` holds: version, created_at (Tashkent), git_commit, train_date_range, n_rows, features, cv_scores, test_scores (release only), unhealthy_threshold, decision_probability_threshold, feature_ranges (min and max per feature on training data; B uses them to catch inputs unlike the training data).
 
 ## 5. Test-set discipline
 - `TEST_START_DATE` chosen by A on day one: 2026-09-25 (60 days), with a 7-day gap.

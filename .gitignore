@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 .env
 *.db
+*.db-wal
+*.db-shm
+logs/oof_*.csv
 data/hourly_raw.csv
 data/daily_all.csv
 test_api.py
